@@ -20,6 +20,9 @@ anchor-lang = { version = "0.28.0", features = ["init-if-needed"] }
 anchor-spl = "0.28.0"
 solana-program = "1.16"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
+mpl-bubblegum = "1.0.0"
+spl-account-compression = "0.2.0"
+spl-noop = "0.2.0"
 
 [dev-dependencies]
 solana-program-test = "1.16"
