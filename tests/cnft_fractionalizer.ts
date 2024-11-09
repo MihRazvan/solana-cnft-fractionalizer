@@ -21,7 +21,19 @@ import {
   TokenStandard,
   TokenProgramVersion,
 } from "@metaplex-foundation/mpl-bubblegum";
-import { none } from "@metaplex-foundation/umi";
+import {
+  none,
+  publicKey,
+  Umi,
+  createSignerFromKeypair,
+  generateSigner,
+  signerIdentity,
+  PublicKey as UmiPublicKey,
+  Signer,
+  Context,
+  transactionBuilder,
+} from "@metaplex-foundation/umi";
+import { expect } from 'chai';
 
 describe("cnft_fractionalizer", () => {
   const provider = anchor.AnchorProvider.env();
@@ -30,28 +42,40 @@ describe("cnft_fractionalizer", () => {
   const program = anchor.workspace
     .CnftFractionalizer as Program<CnftFractionalizer>;
 
-  // Initialize Umi
-  const umi = createUmi(provider.connection)
-    .use(mplBubblegum());
+  // Initialize Umi with a keypair identity
+  let umi: Umi;
 
-  // Test keypairs
-  let merkleTree: Keypair;
+  // Test keypairs for Anchor program
   let shareMint: Keypair;
   let vaultPDA: PublicKey;
   let vaultBump: number;
   let uniqueId: anchor.BN;
-  let testNftOwner: Keypair;
 
-  // Bubblegum test data
+  // Umi signers and accounts
+  let merkleTreeSigner: Signer;
+  let testNftOwner: Signer;
   let treeAuthority: PublicKey;
-  let assetId: PublicKey;
+  let assetId: UmiPublicKey;
 
   beforeEach(async () => {
-    // Generate new keypairs for each test
-    merkleTree = Keypair.generate();
+    // Create UMI instance with identity
+    const wallet = provider.wallet as anchor.Wallet;
+    umi = createUmi(provider.connection.rpcEndpoint)
+      .use(mplBubblegum());
+
+    const walletSigner = createSignerFromKeypair(umi, {
+      publicKey: publicKey(wallet.publicKey.toBase58()),
+      secretKey: wallet.payer.secretKey,
+    });
+    umi = umi.use(signerIdentity(walletSigner));
+
+    // Generate new keypairs for Anchor program
     shareMint = Keypair.generate();
-    testNftOwner = Keypair.generate();
     uniqueId = new anchor.BN(Math.floor(Math.random() * 1000000));
+
+    // Generate Umi signers
+    merkleTreeSigner = generateSigner(umi);
+    testNftOwner = generateSigner(umi);
 
     // Find the vault PDA
     const [vaultAddress, bump] = await PublicKey.findProgramAddress(
@@ -67,12 +91,12 @@ describe("cnft_fractionalizer", () => {
 
     // Find tree authority PDA
     [treeAuthority] = PublicKey.findProgramAddressSync(
-      [merkleTree.publicKey.toBuffer()],
+      [Buffer.from(merkleTreeSigner.publicKey)],
       program.programId
     );
 
     console.log("Test setup completed:");
-    console.log("Merkle Tree:", merkleTree.publicKey.toString());
+    console.log("Merkle Tree:", merkleTreeSigner.publicKey);
     console.log("Tree Authority:", treeAuthority.toString());
     console.log("Vault PDA:", vaultPDA.toString());
     console.log("Share Mint:", shareMint.publicKey.toString());
@@ -98,13 +122,82 @@ describe("cnft_fractionalizer", () => {
       const vaultData = await program.account.vault.fetch(vaultPDA);
       console.log("Vault data:", vaultData);
 
-      assert.ok(vaultData.owner.equals(provider.wallet.publicKey));
-      assert.ok(vaultData.shareMint.equals(shareMint.publicKey));
-      assert.strictEqual(vaultData.isLocked, false);
-      assert.strictEqual(vaultData.bump, vaultBump);
-      assert.ok(vaultData.uniqueId.eq(uniqueId));
+      expect(vaultData.owner.toBase58()).to.equal(provider.wallet.publicKey.toBase58());
+      expect(vaultData.shareMint.toBase58()).to.equal(shareMint.publicKey.toBase58());
+      expect(vaultData.isLocked).to.be.false;
+      expect(vaultData.bump).to.equal(vaultBump);
+      expect(vaultData.uniqueId.eq(uniqueId)).to.be.true;
 
       console.log("✅ Test passed successfully");
+    } catch (error) {
+      console.error("❌ Test failed:", error);
+      throw error;
+    }
+  });
+
+  it("Can create tree and mint test cNFT", async () => {
+    try {
+      // Initialize context for transactions
+      const context = {
+        payer: umi.payer,
+        rpc: umi.rpc,
+        transactions: umi.transactions,
+      } satisfies Pick<Context, "payer" | "rpc" | "transactions">;
+
+      // Create tree
+      const treeCreation = await createTree(umi, {
+        merkleTree: merkleTreeSigner,
+        maxDepth: 14,
+        maxBufferSize: 64,
+        public: true,
+      });
+
+      const latestBlockhash = await umi.rpc.getLatestBlockhash();
+      const treeTx = await treeCreation.send(context);
+      await umi.rpc.confirmTransaction(treeTx, {
+        strategy: {
+          type: 'blockhash',
+          blockhash: latestBlockhash.blockhash.toString(),
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+        },
+      });
+      console.log("Tree created successfully");
+
+      // Mint test cNFT
+      const mintCreation = await mintV1(umi, {
+        leafOwner: testNftOwner.publicKey,
+        merkleTree: merkleTreeSigner.publicKey,
+        metadata: {
+          name: "Test cNFT",
+          symbol: "TEST",
+          uri: "https://test.uri/metadata.json",
+          sellerFeeBasisPoints: 0,
+          collection: none(),
+          creators: [{
+            address: publicKey(provider.wallet.publicKey.toBase58()),
+            verified: false,
+            share: 100,
+          }],
+        },
+      });
+
+      const newBlockhash = await umi.rpc.getLatestBlockhash();
+      const mintTx = await mintCreation.send(context);
+      await umi.rpc.confirmTransaction(mintTx, {
+        strategy: {
+          type: 'blockhash',
+          blockhash: newBlockhash.blockhash.toString(),
+          lastValidBlockHeight: newBlockhash.lastValidBlockHeight
+        },
+      });
+      console.log("cNFT minted successfully");
+
+      // Get asset data and verify
+      const asset = await getAssetWithProof(umi, assetId);
+      expect(asset).to.not.be.null;
+      expect(asset.leafOwner).to.equal(testNftOwner.publicKey);
+
+      console.log("✅ Tree creation and minting test passed successfully");
     } catch (error) {
       console.error("❌ Test failed:", error);
       throw error;
