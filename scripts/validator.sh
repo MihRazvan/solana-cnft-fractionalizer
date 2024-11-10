@@ -20,7 +20,6 @@ solana-test-validator \
   --bpf-program noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmR "$PROGRAM_DIR/noop.so" \
   --bpf-program cmprV1LGw39K9P6vzHrZJkxRhqhreZHAkBKMT4BJUzh "$PROGRAM_DIR/compression.so" \
   --rpc-port 8899 \
-  --url https://api.mainnet-beta.solana.com \
   &
 
 # Wait for validator to start

@@ -1,24 +1,23 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount};
-use mpl_bubblegum::{
-    program::MplBubblegum,
-    state::{leaf_schema::LeafSchema, metaplex_adapter::MetadataArgs},
-};
+use mpl_bubblegum::cpi::accounts::Transfer;
+use mpl_bubblegum::cpi::transfer;
+use mpl_bubblegum::Hash;
 use spl_account_compression::program::SplAccountCompression;
-use spl_noop::program::SplNoop;
+// Remove unnecessary imports
+// use spl_noop::program::SplNoop;
 
-declare_id!("5Hs2RT19nJj52dkYPxTZJAWnNwLFeL7K959YBtUs7s3j");
+declare_id!("YourProgramIDHere");
 
 #[program]
 pub mod cnft_fractionalizer {
     use super::*;
-    use mpl_bubblegum::instructions::TransferCpi;
 
     pub fn initialize_vault(
         ctx: Context<InitializeVault>,
         bump: u8,
         num_shares: u64,
-        unique_id: u64, // Add unique_id parameter
+        unique_id: u64,
     ) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         vault.owner = ctx.accounts.initializer.key();
@@ -26,7 +25,7 @@ pub mod cnft_fractionalizer {
         vault.total_shares = num_shares;
         vault.is_locked = false;
         vault.bump = bump;
-        vault.unique_id = unique_id; // Store unique_id
+        vault.unique_id = unique_id;
 
         Ok(())
     }
@@ -40,29 +39,28 @@ pub mod cnft_fractionalizer {
         index: u32,
     ) -> Result<()> {
         require!(!ctx.accounts.vault.is_locked, ErrorCode::VaultLocked);
-    
+
         // Prepare the accounts for the Bubblegum transfer instruction
-        let cpi_accounts = mpl_bubblegum::cpi::accounts::Transfer {
+        let cpi_accounts = Transfer {
             tree_authority: ctx.accounts.tree_authority.to_account_info(),
             leaf_owner: ctx.accounts.depositor.to_account_info(),
-            leaf_delegate: ctx.accounts.depositor.to_account_info(),
+            leaf_delegate: ctx.accounts.depositor.to_account_info(), // Assuming depositor is the delegate
             new_leaf_owner: ctx.accounts.vault.to_account_info(),
             merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
             log_wrapper: ctx.accounts.log_wrapper.to_account_info(),
             compression_program: ctx.accounts.compression_program.to_account_info(),
             system_program: ctx.accounts.system_program.to_account_info(),
         };
-    
+
         // Create the CPI context, including the remaining accounts (Merkle proof)
-        let cpi_ctx = CpiContext::new_with_remaining_accounts(
+        let cpi_ctx = CpiContext::new(
             ctx.accounts.bubblegum_program.to_account_info(),
             cpi_accounts,
-            ctx.remaining_accounts.to_vec(),
-        );
-    
+        ).with_remaining_accounts(ctx.remaining_accounts.to_vec());
+
         // Call the transfer instruction in the Bubblegum program
-        mpl_bubblegum::cpi::transfer(cpi_ctx, root, data_hash, creator_hash, nonce, index)?;
-    
+        transfer(cpi_ctx, root, data_hash, creator_hash, nonce, index)?;
+
         // Store the cNFT data in the vault
         let vault = &mut ctx.accounts.vault;
         vault.merkle_root = root;
@@ -71,7 +69,7 @@ pub mod cnft_fractionalizer {
         vault.nonce = nonce;
         vault.index = index;
         vault.is_locked = true;
-    
+
         // Mint fractional tokens to the depositor
         let seeds = &[
             b"vault",
@@ -80,13 +78,13 @@ pub mod cnft_fractionalizer {
             &[vault.bump],
         ];
         let signer = &[&seeds[..]];
-    
+
         let cpi_accounts = token::MintTo {
             mint: ctx.accounts.share_mint.to_account_info(),
             to: ctx.accounts.depositor_token_account.to_account_info(),
             authority: ctx.accounts.vault.to_account_info(),
         };
-    
+
         token::mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -95,10 +93,9 @@ pub mod cnft_fractionalizer {
             ),
             ctx.accounts.vault.total_shares,
         )?;
-    
+
         Ok(())
     }
-
 
     pub fn withdraw_cnft(ctx: Context<WithdrawCNFT>) -> Result<()> {
         let depositor_balance = ctx.accounts.depositor_token_account.amount;
@@ -107,7 +104,7 @@ pub mod cnft_fractionalizer {
             ErrorCode::InsufficientShares
         );
 
-        // Burn all fraction tokens
+        // Burn all fractional tokens
         let cpi_accounts = token::Burn {
             mint: ctx.accounts.share_mint.to_account_info(),
             from: ctx.accounts.depositor_token_account.to_account_info(),
@@ -132,7 +129,7 @@ pub mod cnft_fractionalizer {
 }
 
 #[derive(Accounts)]
-#[instruction(bump: u8, num_shares: u64, unique_id: u64)] // Add unique_id to instruction
+#[instruction(bump: u8, num_shares: u64, unique_id: u64)]
 pub struct InitializeVault<'info> {
     #[account(mut)]
     pub initializer: Signer<'info>,
@@ -178,29 +175,24 @@ pub struct DepositCNFT<'info> {
     )]
     pub depositor_token_account: Account<'info, TokenAccount>,
 
-    // Bubblegum required accounts
-    /// CHECK: Validated by Bubblegum program
+    /// CHECK: Verified in Bubblegum program
     #[account(mut)]
     pub tree_authority: UncheckedAccount<'info>,
-    /// CHECK: Validated by Bubblegum program
+    /// CHECK: Verified in Bubblegum program
     #[account(mut)]
     pub merkle_tree: UncheckedAccount<'info>,
-    /// CHECK: Validated by Bubblegum program
+    /// CHECK: Verified in Bubblegum program
     pub log_wrapper: UncheckedAccount<'info>,
 
-    pub bubblegum_program: Program<'info, MplBubblegum>,
+    pub bubblegum_program: Program<'info, mpl_bubblegum::program::Bubblegum>,
     pub compression_program: Program<'info, SplAccountCompression>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
 
-    // Accept remaining accounts for Merkle proof
-    #[account(signer, address = depositor.key())]
-    pub leaf_delegate: UncheckedAccount<'info>,
-
+    /// Remaining accounts for Merkle proof
     #[remaining_accounts]
-    pub proof_accounts: Vec<AccountInfo<'info>>,
+    pub proof: Vec<AccountInfo<'info>>,
 }
-
 
 #[derive(Accounts)]
 pub struct WithdrawCNFT<'info> {
@@ -210,7 +202,11 @@ pub struct WithdrawCNFT<'info> {
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub share_mint: Account<'info, Mint>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = depositor_token_account.mint == share_mint.key(),
+        constraint = depositor_token_account.owner == depositor.key()
+    )]
     pub depositor_token_account: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }
@@ -227,11 +223,11 @@ pub struct Vault {
     pub nonce: u64,
     pub index: u32,
     pub bump: u8,
-    pub unique_id: u64, // Add unique_id field
+    pub unique_id: u64,
 }
 
 impl Vault {
-    pub const LEN: usize = 32 + 32 + 8 + 1 + 32 + 32 + 32 + 8 + 4 + 1 + 8; // Add 8 bytes for unique_id
+    pub const LEN: usize = 32 + 32 + 8 + 1 + 32 + 32 + 32 + 8 + 4 + 1 + 8;
 }
 
 #[error_code]
