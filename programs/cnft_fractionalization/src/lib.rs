@@ -38,30 +38,31 @@ pub mod cnft_fractionalizer {
         creator_hash: [u8; 32],
         nonce: u64,
         index: u32,
-        proof: Vec<[u8; 32]>, // Merkle proof
     ) -> Result<()> {
         require!(!ctx.accounts.vault.is_locked, ErrorCode::VaultLocked);
-
-        // Verify the cNFT ownership using the provided proof
-        // This is done through the Bubblegum program
-        let transfer_cpi = TransferCpi::new(
-            &ctx.accounts.bubblegum_program,
-            mpl_bubblegum::accounts::Transfer {
-                tree_authority: ctx.accounts.tree_authority.to_account_info(),
-                leaf_owner: ctx.accounts.depositor.to_account_info(),
-                leaf_delegate: ctx.accounts.depositor.to_account_info(),
-                new_leaf_owner: ctx.accounts.vault.to_account_info(),
-                merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
-                log_wrapper: ctx.accounts.log_wrapper.to_account_info(),
-                compression_program: ctx.accounts.compression_program.to_account_info(),
-                system_program: ctx.accounts.system_program.to_account_info(),
-            },
+    
+        // Prepare the accounts for the Bubblegum transfer instruction
+        let cpi_accounts = mpl_bubblegum::cpi::accounts::Transfer {
+            tree_authority: ctx.accounts.tree_authority.to_account_info(),
+            leaf_owner: ctx.accounts.depositor.to_account_info(),
+            leaf_delegate: ctx.accounts.depositor.to_account_info(),
+            new_leaf_owner: ctx.accounts.vault.to_account_info(),
+            merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
+            log_wrapper: ctx.accounts.log_wrapper.to_account_info(),
+            compression_program: ctx.accounts.compression_program.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+        };
+    
+        // Create the CPI context, including the remaining accounts (Merkle proof)
+        let cpi_ctx = CpiContext::new_with_remaining_accounts(
+            ctx.accounts.bubblegum_program.to_account_info(),
+            cpi_accounts,
+            ctx.remaining_accounts.to_vec(),
         );
-
-        // The proofs are passed as remaining accounts
-        // Each proof hash is passed as an AccountInfo
-        transfer_cpi.invoke()?;
-
+    
+        // Call the transfer instruction in the Bubblegum program
+        mpl_bubblegum::cpi::transfer(cpi_ctx, root, data_hash, creator_hash, nonce, index)?;
+    
         // Store the cNFT data in the vault
         let vault = &mut ctx.accounts.vault;
         vault.merkle_root = root;
@@ -70,22 +71,22 @@ pub mod cnft_fractionalizer {
         vault.nonce = nonce;
         vault.index = index;
         vault.is_locked = true;
-
+    
         // Mint fractional tokens to the depositor
         let seeds = &[
             b"vault",
-            ctx.accounts.depositor.to_account_info().key.as_ref(),
+            ctx.accounts.depositor.key.as_ref(),
             &vault.unique_id.to_le_bytes(),
             &[vault.bump],
         ];
         let signer = &[&seeds[..]];
-
+    
         let cpi_accounts = token::MintTo {
             mint: ctx.accounts.share_mint.to_account_info(),
             to: ctx.accounts.depositor_token_account.to_account_info(),
             authority: ctx.accounts.vault.to_account_info(),
         };
-
+    
         token::mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -94,7 +95,7 @@ pub mod cnft_fractionalizer {
             ),
             ctx.accounts.vault.total_shares,
         )?;
-
+    
         Ok(())
     }
 
@@ -176,7 +177,7 @@ pub struct DepositCNFT<'info> {
         constraint = depositor_token_account.owner == depositor.key()
     )]
     pub depositor_token_account: Account<'info, TokenAccount>,
-    
+
     // Bubblegum required accounts
     /// CHECK: Validated by Bubblegum program
     #[account(mut)]
@@ -186,12 +187,20 @@ pub struct DepositCNFT<'info> {
     pub merkle_tree: UncheckedAccount<'info>,
     /// CHECK: Validated by Bubblegum program
     pub log_wrapper: UncheckedAccount<'info>,
-    
+
     pub bubblegum_program: Program<'info, MplBubblegum>,
     pub compression_program: Program<'info, SplAccountCompression>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
+
+    // Accept remaining accounts for Merkle proof
+    #[account(signer, address = depositor.key())]
+    pub leaf_delegate: UncheckedAccount<'info>,
+
+    #[remaining_accounts]
+    pub proof_accounts: Vec<AccountInfo<'info>>,
 }
+
 
 #[derive(Accounts)]
 pub struct WithdrawCNFT<'info> {
