@@ -1,13 +1,27 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount};
-use mpl_bubblegum::cpi::accounts::Transfer;
-use mpl_bubblegum::cpi::transfer;
-use mpl_bubblegum::Hash;
-use spl_account_compression::program::SplAccountCompression;
-// Remove unnecessary imports
-// use spl_noop::program::SplNoop;
+use mpl_bubblegum::ID as BUBBLEGUM_PROGRAM_ID;
+use spl_account_compression::ID as COMPRESSION_PROGRAM_ID;
 
-declare_id!("YourProgramIDHere");
+declare_id!("5Hs2RT19nJj52dkYPxTZJAWnNwLFeL7K959YBtUs7s3j");
+
+#[derive(Clone)]
+pub struct BubblegumProgram;
+
+impl Id for BubblegumProgram {
+    fn id() -> Pubkey {
+        BUBBLEGUM_PROGRAM_ID
+    }
+}
+
+#[derive(Clone)]
+pub struct CompressionProgram;
+
+impl Id for CompressionProgram {
+    fn id() -> Pubkey {
+        COMPRESSION_PROGRAM_ID
+    }
+}
 
 #[program]
 pub mod cnft_fractionalizer {
@@ -39,29 +53,46 @@ pub mod cnft_fractionalizer {
         index: u32,
     ) -> Result<()> {
         require!(!ctx.accounts.vault.is_locked, ErrorCode::VaultLocked);
-
-        // Prepare the accounts for the Bubblegum transfer instruction
-        let cpi_accounts = Transfer {
-            tree_authority: ctx.accounts.tree_authority.to_account_info(),
-            leaf_owner: ctx.accounts.depositor.to_account_info(),
-            leaf_delegate: ctx.accounts.depositor.to_account_info(), // Assuming depositor is the delegate
-            new_leaf_owner: ctx.accounts.vault.to_account_info(),
-            merkle_tree: ctx.accounts.merkle_tree.to_account_info(),
-            log_wrapper: ctx.accounts.log_wrapper.to_account_info(),
-            compression_program: ctx.accounts.compression_program.to_account_info(),
-            system_program: ctx.accounts.system_program.to_account_info(),
+    
+        // Build transfer instruction data
+        let mut instruction_data = Vec::with_capacity(1 + 32 + 32 + 32 + 8 + 4);
+        instruction_data.push(6); // Discriminator for Transfer
+        instruction_data.extend_from_slice(&root);
+        instruction_data.extend_from_slice(&data_hash);
+        instruction_data.extend_from_slice(&creator_hash);
+        instruction_data.extend_from_slice(&nonce.to_le_bytes());
+        instruction_data.extend_from_slice(&index.to_le_bytes());
+    
+        // Build transfer instruction
+        let ix = solana_program::instruction::Instruction {
+            program_id: BUBBLEGUM_PROGRAM_ID,
+            accounts: vec![
+                solana_program::instruction::AccountMeta::new(ctx.accounts.tree_authority.key(), false),
+                solana_program::instruction::AccountMeta::new(ctx.accounts.depositor.key(), true),
+                solana_program::instruction::AccountMeta::new(ctx.accounts.vault.key(), false),
+                solana_program::instruction::AccountMeta::new(ctx.accounts.merkle_tree.key(), false),
+                solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.log_wrapper.key(), false),
+                solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.compression_program.key(), false),
+                solana_program::instruction::AccountMeta::new_readonly(ctx.accounts.system_program.key(), false),
+            ],
+            data: instruction_data,
         };
-
-        // Create the CPI context, including the remaining accounts (Merkle proof)
-        let cpi_ctx = CpiContext::new(
-            ctx.accounts.bubblegum_program.to_account_info(),
-            cpi_accounts,
-        ).with_remaining_accounts(ctx.remaining_accounts.to_vec());
-
-        // Call the transfer instruction in the Bubblegum program
-        transfer(cpi_ctx, root, data_hash, creator_hash, nonce, index)?;
-
-        // Store the cNFT data in the vault
+    
+        // Execute transfer instruction
+        anchor_lang::solana_program::program::invoke(
+            &ix,
+            &[
+                ctx.accounts.tree_authority.to_account_info(),
+                ctx.accounts.depositor.to_account_info(),
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.merkle_tree.to_account_info(),
+                ctx.accounts.log_wrapper.to_account_info(),
+                ctx.accounts.compression_program.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+    
+        // Store cNFT data and lock vault
         let vault = &mut ctx.accounts.vault;
         vault.merkle_root = root;
         vault.data_hash = data_hash;
@@ -69,8 +100,8 @@ pub mod cnft_fractionalizer {
         vault.nonce = nonce;
         vault.index = index;
         vault.is_locked = true;
-
-        // Mint fractional tokens to the depositor
+    
+        // Mint fractional tokens to depositor
         let seeds = &[
             b"vault",
             ctx.accounts.depositor.key.as_ref(),
@@ -78,13 +109,13 @@ pub mod cnft_fractionalizer {
             &[vault.bump],
         ];
         let signer = &[&seeds[..]];
-
+    
         let cpi_accounts = token::MintTo {
             mint: ctx.accounts.share_mint.to_account_info(),
             to: ctx.accounts.depositor_token_account.to_account_info(),
             authority: ctx.accounts.vault.to_account_info(),
         };
-
+    
         token::mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -93,7 +124,7 @@ pub mod cnft_fractionalizer {
             ),
             ctx.accounts.vault.total_shares,
         )?;
-
+    
         Ok(())
     }
 
@@ -116,6 +147,7 @@ pub mod cnft_fractionalizer {
             ctx.accounts.vault.total_shares,
         )?;
 
+        // Reset vault state
         let vault = &mut ctx.accounts.vault;
         vault.is_locked = false;
         vault.merkle_root = [0; 32];
@@ -184,14 +216,10 @@ pub struct DepositCNFT<'info> {
     /// CHECK: Verified in Bubblegum program
     pub log_wrapper: UncheckedAccount<'info>,
 
-    pub bubblegum_program: Program<'info, mpl_bubblegum::program::Bubblegum>,
-    pub compression_program: Program<'info, SplAccountCompression>,
+    pub bubblegum_program: Program<'info, BubblegumProgram>,
+    pub compression_program: Program<'info, CompressionProgram>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
-
-    /// Remaining accounts for Merkle proof
-    #[remaining_accounts]
-    pub proof: Vec<AccountInfo<'info>>,
 }
 
 #[derive(Accounts)]

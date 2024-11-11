@@ -1,7 +1,3 @@
-[features]
-seeds = false
-skip-lint = false
-
 [programs.localnet]
 cnft_fractionalizer = "5Hs2RT19nJj52dkYPxTZJAWnNwLFeL7K959YBtUs7s3j"
 
@@ -13,20 +9,4 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
-
-[test]
-startup_wait = 10000
-
-# Commented out since we're using a custom validator script
-# [test.validator]
-# url = "https://api.mainnet-beta.solana.com"
-
-# [[test.validator.clone]]
-# address = "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY" # Bubblegum program
-
-# [[test.validator.clone]]
-# address = "cmprV1LGw39K9P6vzHrZJkxRhqhreZHAkBKMT4BJUzh" # Account compression program
-
-# [[test.validator.clone]]
-# address = "noopb9bkMVfRPU8AsbpTUg8AQkHtKwMYZiFUjNRtMmR" # Noop program
+test = "pnpm run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
